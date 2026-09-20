@@ -1,0 +1,119 @@
+name: CI
+on:
+  pull_request:
+    branches:
+      - main
+      - vm6-e2e-alt-20260921
+
+permissions:
+  contents: read
+  actions: read
+  pull-requests: read
+
+jobs:
+  mq-e2e:
+    name: mq-e2e
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Seed failed-tests artifact from trusted context
+        env:
+          VM6_BASE_REF: ${{ github.base_ref }}
+          VM6_PR_TITLE: ${{ github.event.pull_request.title }}
+        shell: python
+        run: |
+          import os
+          from pathlib import Path
+          base = os.environ.get("VM6_BASE_REF", "")
+          if base == "vm6-e2e-alt-20260921":
+              failures = ["tests/test_harmless.py::test_harmless"]
+              source = "trusted-alt-base"
+          elif Path("bad-marker.txt").exists():
+              failures = ["tests/test_required.py::test_required"]
+              source = "bad-marker-present"
+          else:
+              failures = ["tests/test_harmless.py::test_harmless"]
+              source = "no-bad-marker"
+          Path("failed-tests.txt").write_text("\n".join(failures) + "\n")
+          print(f"VM6_BASE_REF={base}")
+          print(f"VM6_PR_TITLE={os.environ.get('VM6_PR_TITLE','')}")
+          print(f"VM6_ARTIFACT_SOURCE={source}")
+          print(f"VM6_ARTIFACT_TESTS={' '.join(failures)}")
+
+      - name: Install the Mergify CLI
+        if: startsWith(github.event.pull_request.title, 'merge queue:')
+        uses: Mergifyio/setup-cli@v2
+
+      - name: Read merge queue metadata
+        id: queue-info
+        if: startsWith(github.event.pull_request.title, 'merge queue:')
+        continue-on-error: true
+        run: mergify ci queue-info
+
+      - name: Download previous failed-tests using documented latest-run lookup
+        id: previous
+        if: steps.queue-info.outcome == 'success'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          QUEUE_METADATA: ${{ steps.queue-info.outputs.queue_metadata }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          sha=$(jq -r '.previous_failed_batches[-1].batch_pr_head_sha // empty' <<< "$QUEUE_METADATA")
+          if [ -z "$sha" ]; then
+            echo 'VM6_NO_PREVIOUS_FAILED_BATCH=1'
+            exit 0
+          fi
+          echo "VM6_PARENT_SHA=$sha"
+          # Controlled delay gives the lower-trust producer time to create a later
+          # same-workflow/same-SHA run after the parent batch fails and before this lookup.
+          sleep 90
+          run_id=$(gh run list --commit "$sha" --workflow CI --json databaseId -q '.[0].databaseId // empty')
+          [ -n "$run_id" ] || { echo 'No matching parent run'; exit 1; }
+          echo "VM6_SELECTED_RUN_ID=$run_id"
+          gh run view "$run_id" --json databaseId,event,headSha,headBranch,createdAt,displayTitle \
+            --jq '{databaseId,event,headSha,headBranch,createdAt,displayTitle}'
+          rm -rf previous-failed-tests
+          gh run download "$run_id" --name failed-tests --dir previous-failed-tests
+          tests=$(paste -sd ' ' previous-failed-tests/failed-tests.txt)
+          echo "VM6_SELECTED_TESTS=$tests"
+          echo "tests=$tests" >> "$GITHUB_OUTPUT"
+
+      - name: Execute selected or full test set
+        env:
+          ONLY_TESTS: ${{ steps.previous.outputs.tests }}
+          VM6_BASE_REF: ${{ github.base_ref }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ "$VM6_BASE_REF" = 'vm6-e2e-alt-20260921' ]; then
+            echo 'VM6_ALT_CONTEXT_PRODUCER=pass'
+            exit 0
+          fi
+          if [ -n "${ONLY_TESTS:-}" ]; then
+            echo "VM6_MODE=selected"
+            echo "VM6_ONLY_TESTS=$ONLY_TESTS"
+            if grep -q 'tests/test_required.py::test_required' <<< "$ONLY_TESTS" && [ -f bad-marker.txt ]; then
+              echo 'VM6_REQUIRED_TEST_RESULT=fail'
+              exit 1
+            fi
+            echo 'VM6_SELECTED_TEST_RESULT=pass'
+            exit 0
+          fi
+          echo 'VM6_MODE=full'
+          if [ -f bad-marker.txt ]; then
+            echo 'VM6_REQUIRED_TEST_RESULT=fail'
+            exit 1
+          fi
+          echo 'VM6_FULL_TEST_RESULT=pass'
+
+      - name: Upload failed-tests artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: failed-tests
+          path: failed-tests.txt
+          if-no-files-found: error
