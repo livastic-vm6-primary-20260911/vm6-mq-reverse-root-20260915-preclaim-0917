@@ -45,7 +45,7 @@ jobs:
 
       - name: Install the Mergify CLI
         if: startsWith(github.event.pull_request.title, 'merge queue:')
-        uses: Mergifyio/setup-cli@v2
+        uses: Mergifyio/setup-cli@dc99f07e699b94b39e5495c24596372813eadcbc # v1.3.0
 
       - name: Read merge queue metadata
         id: queue-info
