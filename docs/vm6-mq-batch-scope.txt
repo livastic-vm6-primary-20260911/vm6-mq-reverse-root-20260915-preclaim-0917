@@ -1,0 +1,1 @@
+VM6 docs-only batch scope canary 20260930 sync2
