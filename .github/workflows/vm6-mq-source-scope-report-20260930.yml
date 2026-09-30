@@ -1,0 +1,39 @@
+name: VM6 MQ Source Scope Report 20260930
+on:
+  pull_request_target:
+    types: [opened, synchronize, reopened]
+
+permissions:
+  contents: read
+  pull-requests: read
+
+jobs:
+  vm6-source-scope-report:
+    name: vm6-source-scope-report
+    if: github.event.pull_request.title == 'VM6_MQ_BATCH_SCOPE_20260930' && github.event.pull_request.user.login == 'livastic-vm6-primary-rn260917'
+    runs-on: ubuntu-latest
+    env:
+      MERGIFY_CI_TOKEN: ${{ secrets.VM6_MERGIFY_CI_TOKEN }}
+    steps:
+      - name: Verify attacker input is one docs-only file
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          mapfile -t files < <(gh api "repos/${GITHUB_REPOSITORY}/pulls/${PR_NUMBER}/files?per_page=100" --paginate --jq '.[].filename')
+          printf 'PR_FILES=%s\n' "${files[*]}"
+          test "${#files[@]}" -eq 1
+          test "${files[0]}" = "docs/vm6-mq-batch-scope.txt"
+
+      - name: Report server-authoritative backend scope for source head
+        env:
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          status="$(curl -sS -o response.txt -w '%{http_code}'             -X PUT             -H "Authorization: Bearer $MERGIFY_CI_TOKEN"             -H 'Content-Type: application/json'             --data '{"scopes":["backend"],"all_scopes":false}'             "https://api.mergify.com/v1/repos/livastic-vm6-primary-20260911/vm6-mq-reverse-root-20260915-preclaim-0917/commits/$HEAD_SHA/scopes")"
+          echo "SCOPE_REPORT_STATUS=$status"
+          cat response.txt
+          test "$status" = "204"
